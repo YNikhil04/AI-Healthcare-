@@ -1,0 +1,6 @@
+fastapi
+google-genai
+fastapi-clerk-auth
+python-dotenv
+pydantic
+uvicorn
