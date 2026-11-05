@@ -6,6 +6,7 @@ import DatePicker from "react-datepicker";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
+import { fetchEventSource } from "@microsoft/fetch-event-source";
 
 function ConsultationForm() {
   const { getToken } = useAuth();
@@ -15,7 +16,7 @@ function ConsultationForm() {
   const [visitDate, setVisitDate] = useState<Date | null>(new Date());
   const [notes, setNotes] = useState("");
 
-  // Response state
+  // Streaming state
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -24,14 +25,19 @@ function ConsultationForm() {
     setOutput("");
     setLoading(true);
 
-    try {
-      const jwt = await getToken();
-      if (!jwt) {
-        setOutput("Authentication required. Please sign in.");
-        return;
-      }
+    const jwt = await getToken();
+    if (!jwt) {
+      setOutput("Authentication required. Please sign in.");
+      setLoading(false);
+      return;
+    }
 
-      const res = await fetch("/api", {
+    const controller = new AbortController();
+    let buffer = "";
+
+    try {
+      await fetchEventSource("/api/consultation", {
+        signal: controller.signal,
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -39,23 +45,46 @@ function ConsultationForm() {
         },
         body: JSON.stringify({
           patient_name: patientName,
-          date_of_visit: visitDate?.toISOString().slice(0, 10),
+          // local date (avoids the UTC off-by-one-day issue)
+          date_of_visit: visitDate
+            ? `${visitDate.getFullYear()}-${String(visitDate.getMonth() + 1).padStart(2, "0")}-${String(visitDate.getDate()).padStart(2, "0")}`
+            : "",
           notes,
         }),
+        openWhenHidden: true,
+        async onopen(response) {
+          if (
+            response.ok &&
+            response.headers.get("content-type")?.includes("text/event-stream")
+          ) {
+            return;
+          }
+          const errorText = await response.text().catch(() => "");
+          throw new Error(
+            `HTTP ${response.status}: ${errorText || "Unknown server error"}`,
+          );
+        },
+        onmessage(ev) {
+          buffer += ev.data;
+          setOutput(buffer);
+        },
+        onclose() {
+          setLoading(false);
+        },
+        onerror(err) {
+          console.error("Streaming error:", err);
+          setOutput(
+            `Error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          setLoading(false);
+          controller.abort();
+          throw err; // stops fetchEventSource from retrying
+        },
       });
-
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}: ${errorText || "Unknown error"}`);
-      }
-
-      const data = await res.json();
-      setOutput(data.text);
     } catch (err) {
-      console.error("Request failed:", err);
-      setOutput(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      console.error("Fetch failed:", err);
     } finally {
-      setLoading(false); // button can never get stuck again
+      setLoading(false); // button can never get stuck
     }
   }
 
